@@ -14,56 +14,39 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
-      - name: Inspect directory structure
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        working-directory: apps/house-capture
         run: |
-          echo "=== Inhoud van apps/house-capture ==="
-          ls -la apps/house-capture
-          echo "=== Zoeken naar Xcode projecten in de repo ==="
-          find . -name "*.xcodeproj" -o -name "*.xcworkspace" -o -name "Package.swift"
+          echo "Xcode project genereren vanuit project.yml..."
+          xcodegen generate
+          ls -la
 
       - name: Build unsigned .app
+        working-directory: apps/house-capture
         run: |
-          # Zoek recursief naar .xcworkspace of .xcodeproj in apps/house-capture
-          TARGET_DIR="apps/house-capture"
-          WORKSPACE=$(find "$TARGET_DIR" -name "*.xcworkspace" | head -n 1)
-          PROJECT=$(find "$TARGET_DIR" -name "*.xcodeproj" | head -n 1)
-          
-          if [ -n "$WORKSPACE" ]; then
-            echo "Gevonden workspace: $WORKSPACE"
-            xcodebuild clean build \
-              -workspace "$WORKSPACE" \
-              -scheme $(xcodebuild -workspace "$WORKSPACE" -list | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag' | head -n 1 | xargs) \
-              -configuration Release \
-              -sdk iphoneos \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGN_IDENTITY="" \
-              BUILD_DIR="${{ github.workspace }}/build"
-          elif [ -n "$PROJECT" ]; then
-            echo "Gevonden project: $PROJECT"
-            xcodebuild clean build \
-              -project "$PROJECT" \
-              -scheme $(xcodebuild -project "$PROJECT" -list | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag' | head -n 1 | xargs) \
-              -configuration Release \
-              -sdk iphoneos \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGN_IDENTITY="" \
-              BUILD_DIR="${{ github.workspace }}/build"
-          else
-            echo "Geen Xcode project gevonden. Controleer de 'Inspect directory structure' stap hierboven."
-            exit 1
-          fi
+          PROJECT=$(find . -maxdepth 1 -name "*.xcodeproj" | head -n 1)
+          echo "Gevonden project: $PROJECT"
+          SCHEME=$(xcodebuild -project "$PROJECT" -list | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag' | head -n 1 | xargs)
+          echo "Gebruikt scheme: $SCHEME"
+
+          xcodebuild clean build \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            BUILD_DIR="${{ github.workspace }}/build"
 
       - name: Package to IPA
         run: |
           mkdir -p Payload
           APP_PATH=$(find "${{ github.workspace }}/build" -name "*.app" | head -n 1)
-          if [ -z "$APP_PATH" ]; then
-            echo "Geen .app bestand gevonden in build directory!"
-            exit 1
-          fi
-          echo "Inpakken van $APP_PATH naar IPA..."
+          echo "Gevonden app: $APP_PATH"
           cp -r "$APP_PATH" Payload/
           zip -r house-capture.ipa Payload
           mkdir -p output
