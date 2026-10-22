@@ -753,19 +753,90 @@ final class CoverageEngine: @unchecked Sendable {
       }
     }
     for obj in room.objects {
-      let t = obj.transform, d = obj.dimensions
-      let x = simd_make_float3(t.columns.0), y = simd_make_float3(t.columns.1), z = simd_make_float3(t.columns.2)
-      let c = simd_make_float3(t.columns.3)
-      // top + four sides
-      for (off, n, w, h, ax, ay) in [
-        (y * d.y / 2, y, d.x, d.z, x, z),
-        (z * d.z / 2, z, d.x, d.y, x, y), (-z * d.z / 2, -z, d.x, d.y, x, y),
-        (x * d.x / 2, x, d.z, d.y, z, y), (-x * d.x / 2, -x, d.z, d.y, z, y),
-      ] {
-        var m = matrix_identity_float4x4
-        m.columns.0 = SIMD4(ax, 0); m.columns.1 = SIMD4(ay, 0); m.columns.2 = SIMD4(n, 0); m.columns.3 = SIMD4(c + off, 1)
-        surface(m, w, h, n)
+      let t: simd_float4x4 = obj.transform
+      let d: SIMD3<Float> = obj.dimensions
+
+      let x: SIMD3<Float> = simd_make_float3(t.columns.0)
+      let y: SIMD3<Float> = simd_make_float3(t.columns.1)
+      let z: SIMD3<Float> = simd_make_float3(t.columns.2)
+      let c: SIMD3<Float> = simd_make_float3(t.columns.3)
+
+      let halfX: Float = d.x / 2
+      let halfY: Float = d.y / 2
+      let halfZ: Float = d.z / 2
+
+      let offsetX: SIMD3<Float> = x * halfX
+      let offsetY: SIMD3<Float> = y * halfY
+      let offsetZ: SIMD3<Float> = z * halfZ
+
+      func addFace(
+        offset: SIMD3<Float>,
+        normal: SIMD3<Float>,
+        width: Float,
+        height: Float,
+        axisX: SIMD3<Float>,
+        axisY: SIMD3<Float>
+      ) {
+        let position: SIMD3<Float> = c + offset
+
+        var m: simd_float4x4 = matrix_identity_float4x4
+        m.columns.0 = SIMD4<Float>(axisX.x, axisX.y, axisX.z, 0)
+        m.columns.1 = SIMD4<Float>(axisY.x, axisY.y, axisY.z, 0)
+        m.columns.2 = SIMD4<Float>(normal.x, normal.y, normal.z, 0)
+        m.columns.3 = SIMD4<Float>(position.x, position.y, position.z, 1)
+
+        surface(m, width, height, normal)
       }
+
+      // Top
+      addFace(
+        offset: offsetY,
+        normal: y,
+        width: d.x,
+        height: d.z,
+        axisX: x,
+        axisY: z
+      )
+
+      // Front
+      addFace(
+        offset: offsetZ,
+        normal: z,
+        width: d.x,
+        height: d.y,
+        axisX: x,
+        axisY: y
+      )
+
+      // Back
+      addFace(
+        offset: -offsetZ,
+        normal: -z,
+        width: d.x,
+        height: d.y,
+        axisX: x,
+        axisY: y
+      )
+
+      // Right
+      addFace(
+        offset: offsetX,
+        normal: x,
+        width: d.z,
+        height: d.y,
+        axisX: z,
+        axisY: y
+      )
+
+      // Left
+      addFace(
+        offset: -offsetX,
+        normal: -x,
+        width: d.z,
+        height: d.y,
+        axisX: z,
+        axisY: y
+      )
     }
     return out
   }
