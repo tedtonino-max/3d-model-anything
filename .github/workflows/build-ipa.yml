@@ -20,26 +20,24 @@ jobs:
       - name: Generate Xcode Project
         working-directory: apps/house-capture
         run: |
-          echo "Xcode project genereren..."
           xcodegen generate
-          ls -la
 
       - name: Build unsigned .app
         working-directory: apps/house-capture
         run: |
           PROJECT=$(find . -maxdepth 1 -name "*.xcodeproj" | head -n 1)
-          echo "Gevonden project: $PROJECT"
           SCHEME=$(xcodebuild -project "$PROJECT" -list | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag' | head -n 1 | xargs)
-          echo "Gebruikt scheme: $SCHEME"
 
           xcodebuild clean build \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
-            -configuration Release \
+            -configuration Debug \
             -sdk iphoneos \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            SWIFT_COMPILATION_MODE=singlefile \
+            OTHER_SWIFT_FLAGS="-Xfrontend -solver-expression-time-threshold=0" \
             BUILD_DIR="${{ github.workspace }}/build"
 
       - name: Package to IPA
