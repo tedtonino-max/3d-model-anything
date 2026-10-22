@@ -20,7 +20,7 @@ jobs:
       - name: Generate Xcode Project
         working-directory: apps/house-capture
         run: |
-          echo "Xcode project genereren vanuit project.yml..."
+          echo "Xcode project genereren..."
           xcodegen generate
           ls -la
 
