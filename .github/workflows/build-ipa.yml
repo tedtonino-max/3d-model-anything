@@ -2,56 +2,52 @@ name: Build House Capture IPA
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: macos-latest
-
+    timeout-minutes: 25
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-
+      - uses: actions/checkout@v4
+      - name: Test detail capture policy
+        run: swift test -c release
       - name: Install XcodeGen
         run: brew install xcodegen
-
-      - name: Generate Xcode Project
+      - name: Generate original app project
         working-directory: apps/house-capture
-        run: |
-          xcodegen generate
-
-      - name: Build unsigned .app
+        run: xcodegen generate
+      - name: Build original app for simulator
         working-directory: apps/house-capture
+        run: >-
+          xcodebuild -project HouseCapture.xcodeproj -scheme HouseCapture
+          -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath ../../build-simulator CODE_SIGNING_ALLOWED=NO build
+      - name: Run original app self-tests
         run: |
-          PROJECT=$(find . -maxdepth 1 -name "*.xcodeproj" | head -n 1)
-          SCHEME=$(xcodebuild -project "$PROJECT" -list | awk '/Schemes:/{flag=1;next}/^$/{flag=0}flag' | head -n 1 | xargs)
-
-          xcodebuild clean build \
-            -project "$PROJECT" \
-            -scheme "$SCHEME" \
-            -configuration Debug \
-            -sdk iphoneos \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            SWIFT_COMPILATION_MODE=singlefile \
-            OTHER_SWIFT_FLAGS="-Xfrontend -solver-expression-time-threshold=0" \
-            BUILD_DIR="${{ github.workspace }}/build"
-
-      - name: Package to IPA
+          SIM=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for a in d["devices"].values() for v in a if "iPad" in v["name"]))')
+          xcrun simctl boot "$SIM" || true
+          xcrun simctl bootstatus "$SIM" -b
+          xcrun simctl install "$SIM" build-simulator/Build/Products/Debug-iphonesimulator/HouseCapture.app
+          xcrun simctl launch --console "$SIM" com.wesbos.housecapture -selftest | tee selftest.log
+          grep -q 'SELFTEST: PASS' selftest.log
+      - name: Build unsigned app for iPhone and iPad
+        working-directory: apps/house-capture
+        run: >-
+          xcodebuild -project HouseCapture.xcodeproj -scheme HouseCapture
+          -configuration Release -sdk iphoneos -destination 'generic/platform=iOS'
+          -derivedDataPath ../../build CODE_SIGNING_ALLOWED=NO build
+      - name: Package IPA
         run: |
           mkdir -p Payload
-          APP_PATH=$(find "${{ github.workspace }}/build" -name "*.app" | head -n 1)
-          echo "Gevonden app: $APP_PATH"
-          cp -r "$APP_PATH" Payload/
-          zip -r house-capture.ipa Payload
-          mkdir -p output
-          mv house-capture.ipa output/
-
-      - name: Upload IPA Artifact
-        uses: actions/upload-artifact@v4
+          cp -R build/Build/Products/Release-iphoneos/HouseCapture.app Payload/
+          ditto -c -k --sequesterRsrc --keepParent Payload 3D-Model-Anything-detail-unsigned.ipa
+      - uses: actions/upload-artifact@v4
         with:
-          name: house-capture-ipa
-          path: output/house-capture.ipa
+          name: house-capture-detail-ipa
+          path: 3D-Model-Anything-detail-unsigned.ipa
+          if-no-files-found: error

@@ -17,6 +17,7 @@ struct CaptureScreen: View {
   var body: some View {
     ZStack {
       ARViewContainer(view: controller.scanView.view).ignoresSafeArea()
+      DetailPaintLayer(focus: controller.detailFocus, controller: controller)
 
       VStack {
         topBar
@@ -325,6 +326,8 @@ struct CaptureScreen: View {
 
   private var scanControls: some View {
     VStack(spacing: 10) {
+      DetailFocusControls(focus: controller.detailFocus, begin: controller.beginDetailFocus,
+                          timestamp: { controller.arSession.currentFrame?.timestamp ?? 0 })
       if controller.captureReady {
         tip(controller.quality.ready ? controller.quality.message : (controller.instruction ?? controller.quality.message))
         if controller.coveragePlateau && !controller.quality.ready {

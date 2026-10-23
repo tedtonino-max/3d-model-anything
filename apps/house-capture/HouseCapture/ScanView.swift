@@ -320,6 +320,7 @@ final class DepthRecorder: @unchecked Sendable {
     var transform: [Float]
     /// column-major 3x3, scaled to the depth map's resolution
     var intrinsics: [Float]
+    var detailID: UUID?
   }
 
   private let bundle: ScanBundle
@@ -335,14 +336,14 @@ final class DepthRecorder: @unchecked Sendable {
   }
 
   /// Call every frame; keeps one when the camera has moved or turned enough (≤ 5/s)
-  func consider(_ frame: ARFrame, room: Int, camera: CameraState?, interval: TimeInterval = 0.2) {
+  func consider(_ frame: ARFrame, room: Int, camera: CameraState?, interval: TimeInterval = 0.2, detailID: UUID? = nil) {
     guard let depth = frame.sceneDepth, inFlight < 3 else { return }
     guard case .normal = frame.camera.trackingState else { return }
     let pose = frame.camera.transform
     if let last {
       let moved = simd_distance(pose.columns.3, last.pose.columns.3)
       let turned = acos(min(1, max(-1, simd_dot(simd_make_float3(pose.columns.2), simd_make_float3(last.pose.columns.2)))))
-      guard frame.timestamp - last.time > interval, moved > 0.04 || turned > 0.06 else { return }
+      guard DetailFocusPolicy.shouldRecord(elapsed: frame.timestamp-last.time, interval: interval, moved: moved, turned: turned, detail: detailID != nil) else { return }
     }
     last = (frame.timestamp, pose)
     let w = CVPixelBufferGetWidth(depth.depthMap), h = CVPixelBufferGetHeight(depth.depthMap)
@@ -360,7 +361,7 @@ final class DepthRecorder: @unchecked Sendable {
     let record = Record(
       file: "depth/\(name).f16z", confidence: "depth/\(name).conf", rgb: cg == nil ? nil : "depth/\(name).jpg",
       rgbIntrinsics: kc.columnMajor, camera: camera, room: room, timestamp: frame.timestamp,
-      width: w, height: h, transform: pose.columnMajor, intrinsics: k.columnMajor)
+      width: w, height: h, transform: pose.columnMajor, intrinsics: k.columnMajor, detailID: detailID)
     let depthData = Self.float16(depth.depthMap)
     let confData = depth.confidenceMap.map(Self.bytes)
     inFlight += 1

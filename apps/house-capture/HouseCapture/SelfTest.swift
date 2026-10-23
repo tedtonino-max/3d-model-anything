@@ -42,6 +42,11 @@ final class SelfTest {
   }
 
   private func roomExperience() throws {
+    let detail = DetailFocus.Region(room: 2, centers: [SIMD3<Float>(1,2,3)])
+    let encoded = try JSONEncoder().encode(detail)
+    let decoded = try JSONDecoder().decode(DetailFocus.Region.self, from: encoded)
+    expect(decoded.centers == detail.centers && decoded.room == 2, "detail region survives export serialization")
+    expect(DetailFocusPolicy.depthInterval(normal: 0.5, constrained: true, active: true) == 0.5, "detail capture respects thermal and memory budget")
     expect(!CaptureQuality(percent: 99, walls: 0, photos: 0).ready, "finish signal requires measured room and photos")
     expect(CaptureQuality(percent: 88, walls: 4, photos: 20).ready, "finish signal accepts sufficient coverage")
     let observed = CoverageEngine.Stats(meshCovered: 0.82601947, meshArea: 20, targetsCovered: 0.1, ceilingCovered: 0, floorCovered: 0)
