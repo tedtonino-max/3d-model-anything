@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <new>
+#include <memory>
 #include <vector>
 
 namespace {
@@ -109,7 +110,7 @@ void emitLayer(DFMesh &mesh,std::vector<Quad> &qs,int w,int h,float tolerance,bo
 extern "C" DFMesh *DFExtractMesh(const DFVolume *v,int minimum,int simplify){
  if(!v)return nullptr;minimum=std::max(1,minimum);
  try {
-  auto mesh=new DFMesh();std::vector<int> cells(v->sdf.size(),-1);
+  auto owner=std::make_unique<DFMesh>();auto mesh=owner.get();std::vector<int> cells(v->sdf.size(),-1);
   for(int z=0;z<v->nz-1;z++)for(int y=0;y<v->ny-1;y++)for(int x=0;x<v->nx-1;x++){
    float s[8];bool good=true,positive=false,negative=false;
    for(int i=0;i<8;i++){size_t id=v->at(x+corner[i][0],y+corner[i][1],z+corner[i][2]);if(v->weight[id]<minimum){good=false;break;}s[i]=v->sdf[id];positive|=s[i]>=0;negative|=s[i]<0;}
@@ -147,7 +148,7 @@ extern "C" DFMesh *DFExtractMesh(const DFVolume *v,int minimum,int simplify){
     emitLayer(*mesh,qs,w,h,v->step*0.2f,simplify);
    }
   }
-  return mesh;
+  return owner.release();
  }catch(...){return nullptr;}
 }
 extern "C" void DFDestroyMesh(DFMesh *m){delete m;}

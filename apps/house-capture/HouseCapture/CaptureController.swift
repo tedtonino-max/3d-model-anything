@@ -881,7 +881,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
       lastWarning = "Some recording files could not be saved: \(error.localizedDescription). Free storage and finish the session to retry."
     }
     record.captureScope=captureScope.rawValue
-    record.objectBounds=objectBounds
+    record.objectBounds=captureScope == .object ? objectBounds : nil
     let scope=captureScope,bounds=objectBounds,selected=detailFocus.regions,bundleSnapshot=bundle
     if scope != .room || selected.contains(where: {$0.room == index}) {
       processingMessage="Dieptemetingen verwerken…"
@@ -899,6 +899,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
         record.reconstruction=SurfaceProcessor.Report(status:"niet voltooid",warning:error.localizedDescription)
       }
     }
+    guard !closed else {return}
     processingMessage="";objectGuide.removeFromParentNode()
     rooms.append(record)
     do {

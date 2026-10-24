@@ -236,7 +236,7 @@ struct CaptureScreen: View {
           .foregroundStyle(.secondary)
       }
       if controller.requiresFreshScan {
-        Text("This scan is saved. Finish this session, then tap Scan a room to continue with a fresh capture.").font(.headline)
+        Text("This scan is saved. Finish this session, then tap Nieuwe scan to continue with a fresh capture.").font(.headline)
       }
       Text(controller.captureScope == .object ? "Naam van je object" : "Naam van je scan").font(.subheadline.weight(.semibold))
       TextField("Bijvoorbeeld poef of woonkamer", text: $controller.roomName)
@@ -365,7 +365,7 @@ struct CaptureScreen: View {
 
   private var objectControls: some View {
     VStack(spacing:6) {
-      Button(controller.objectCenter == nil ? "Richt op object en plaats kader" : "Kader opnieuw plaatsen",action:controller.placeObject).buttonStyle(.borderedProminent)
+      Button(controller.objectCenter == nil ? "Richt op het midden en plaats kader" : "Kader opnieuw plaatsen",action:controller.placeObject).buttonStyle(.borderedProminent)
       if controller.objectCenter != nil {
         HStack {Text("Breedte");Slider(value:$controller.objectWidth,in:0.2...2.5);Text("\(Int(controller.objectWidth*100)) cm").font(.caption.monospacedDigit())}
         HStack {Text("Hoogte");Slider(value:$controller.objectHeight,in:0.2...2.5);Text("\(Int(controller.objectHeight*100)) cm").font(.caption.monospacedDigit())}
@@ -404,7 +404,7 @@ struct CaptureScreen: View {
         AlignmentBadge(alignment: controller.alignment)
         Text(controller.mapSummary ?? "Map not saved").font(.caption).foregroundStyle(.secondary)
       }
-      Text("Come back any time and tap **Scan a room**, or open a saved room and choose **Continue scanning from this room**. Share from the house screen (AirDrop the .zip to your Mac).")
+      Text("Come back any time and tap **Nieuwe scan**, or open a saved room and choose **Continue scanning from this room**. Share from the house screen (AirDrop the .zip to your Mac).")
         .font(.footnote)
         .foregroundStyle(.secondary)
       Button("Close", action: onClose).buttonStyle(.borderedProminent)
