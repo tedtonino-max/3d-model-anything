@@ -17,7 +17,10 @@ struct CaptureScreen: View {
   var body: some View {
     ZStack {
       ARViewContainer(view: controller.scanView.view).ignoresSafeArea()
-      DetailPaintLayer(focus: controller.detailFocus, controller: controller)
+      DetailPaintLayer(focus:controller.detailFocus,controller:controller)
+      if scanning && controller.captureScope == .object && !controller.detailFocus.painting {
+        Image(systemName:"plus").font(.title).foregroundStyle(.cyan).allowsHitTesting(false)
+      }
 
       VStack {
         topBar
@@ -183,7 +186,7 @@ struct CaptureScreen: View {
     case .scanning:
       if controller.paused { pausedPanel } else { scanControls }
     case .finishingRoom:
-      status("Saving \(controller.roomName)…")
+      status(controller.processingMessage.isEmpty ? "Opname opslaan…" : controller.processingMessage)
     case .finishing:
       status(controller.finishingStep.isEmpty ? "Saving…" : controller.finishingStep)
     case .done:
@@ -201,12 +204,16 @@ struct CaptureScreen: View {
 
   private var betweenRooms: some View {
     panel {
+      Picker("Wat wil je scannen?",selection:$controller.captureScope) {
+        ForEach(CaptureScope.allCases) {scope in Text(scope.title).tag(scope)}
+      }.pickerStyle(.segmented)
+      Text(controller.captureScope.guidance).font(.subheadline)
       if controller.rooms.isEmpty {
         if controller.alignment.method == "relocalized" {
           Text("You're lined up with \(controller.zoneName). The faint green is what you scanned before\(controller.priorPhotoCount > 0 ? "; surfaces its \(controller.priorPhotoCount) photos already cover start out green" : ""). Scan a new room, or rescan one to replace it.")
             .font(.subheadline)
         } else {
-          Text("Scan each room once: as you move, a triangle mesh appears. **Green** means good photo coverage, including aligned earlier scans. **Red** needs more photos. Areas without triangles still need scanning. The white outlines are the walls, doors and windows being measured. **Photo detail** measures photography on surfaces already seen by LiDAR; it is not the percentage of the room scanned. Save and review for missing areas.")
+          Text("De basisscan verschijnt over het camerabeeld. Schilder extra detail waar dat nodig is. Na opslaan worden de dieptemetingen verwerkt en kun je het resultaat bekijken.")
             .font(.subheadline)
         }
       } else {
@@ -217,7 +224,11 @@ struct CaptureScreen: View {
           Text("\(last.name): \(last.photographedPercent.map { "\($0)% photo detail" } ?? "not measured") · \(last.detailPhotos ?? 0) photos\(last.mesh == nil ? " · no mesh" : "")")
             .font(.footnote)
         }
-        Button("Review saved room in 3D") { reviewing = true }.buttonStyle(.borderedProminent)
+        if let report=controller.rooms.last?.reconstruction {
+          Text(report.reconstructedFaces>0 ? "Dieptemetingen verwerkt · \(report.reconstructedFaces) nieuwe vlakken" : "Basisscan bewaard; geen nieuw detailoppervlak").font(.subheadline)
+          if let warning=report.warning {Text(warning).font(.caption).foregroundStyle(.orange)}
+        }
+        Button("Bekijk opgeslagen 3D-resultaat") { reviewing = true }.buttonStyle(.borderedProminent)
         Text("Inspect the textured scan before leaving. Use coverage colours in the preview to check gaps.").font(.caption)
         roomList
         Text("Walk into the next room, then start it. Stay in this session so the rooms line up.")
@@ -227,8 +238,8 @@ struct CaptureScreen: View {
       if controller.requiresFreshScan {
         Text("This scan is saved. Finish this session, then tap Scan a room to continue with a fresh capture.").font(.headline)
       }
-      Text("Which room are you in?").font(.subheadline.weight(.semibold))
-      TextField("Room name", text: $controller.roomName)
+      Text(controller.captureScope == .object ? "Naam van je object" : "Naam van je scan").font(.subheadline.weight(.semibold))
+      TextField("Bijvoorbeeld poef of woonkamer", text: $controller.roomName)
         .textFieldStyle(.roundedBorder)
         .submitLabel(.go)
         .focused($nameFocused)
@@ -326,10 +337,11 @@ struct CaptureScreen: View {
 
   private var scanControls: some View {
     VStack(spacing: 10) {
+      if controller.captureScope == .object {objectControls}
       DetailFocusControls(focus: controller.detailFocus, begin: controller.beginDetailFocus,
                           timestamp: { controller.arSession.currentFrame?.timestamp ?? 0 })
       if controller.captureReady {
-        tip(controller.quality.ready ? controller.quality.message : (controller.instruction ?? controller.quality.message))
+        tip(controller.captureScope == .object ? "Loop om je object. Bewaar alle zijden binnen het blauwe kader." : (controller.quality.ready ? controller.quality.message : (controller.instruction ?? controller.quality.message)))
         if controller.coveragePlateau && !controller.quality.ready {
           tip("Photo detail isn't improving much. You can save and review what you have; you don't need to keep circling.")
         }
@@ -342,13 +354,25 @@ struct CaptureScreen: View {
         }
         .buttonStyle(.bordered)
         shutter
-        Button(controller.quality.ready ? "Finish room ✓" : "Save room", action: controller.finishRoom)
+        Button("Opslaan en verwerken",action:controller.finishRoom)
           .buttonStyle(.borderedProminent)
           .tint(controller.quality.ready ? .green : .accentColor)
           .controlSize(.large)
       }
     }
     .padding(.horizontal)
+  }
+
+  private var objectControls: some View {
+    VStack(spacing:6) {
+      Button(controller.objectCenter == nil ? "Richt op object en plaats kader" : "Kader opnieuw plaatsen",action:controller.placeObject).buttonStyle(.borderedProminent)
+      if controller.objectCenter != nil {
+        HStack {Text("Breedte");Slider(value:$controller.objectWidth,in:0.2...2.5);Text("\(Int(controller.objectWidth*100)) cm").font(.caption.monospacedDigit())}
+        HStack {Text("Hoogte");Slider(value:$controller.objectHeight,in:0.2...2.5);Text("\(Int(controller.objectHeight*100)) cm").font(.caption.monospacedDigit())}
+        HStack {Text("Diepte");Slider(value:$controller.objectDepth,in:0.2...2.5);Text("\(Int(controller.objectDepth*100)) cm").font(.caption.monospacedDigit())}
+        Text("Alleen binnen het kader wordt bewaard. Laat ook de voet van het object erin vallen.").font(.caption)
+      }
+    }.padding(10).frame(maxWidth:500).background(.regularMaterial,in:RoundedRectangle(cornerRadius:12))
   }
 
   private var shutter: some View {

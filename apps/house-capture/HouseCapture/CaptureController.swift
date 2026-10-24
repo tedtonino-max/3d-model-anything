@@ -3,6 +3,7 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import ImageIO
 import RoomPlan
+import SceneKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -71,6 +72,36 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
 
   @Published private(set) var phase: Phase
   @Published var roomName = ""
+  @Published var captureScope: CaptureScope = .room
+  @Published var objectWidth: Float = 0.8 { didSet { updateObjectGuide() } }
+  @Published var objectHeight: Float = 0.8 { didSet { updateObjectGuide() } }
+  @Published var objectDepth: Float = 0.8 { didSet { updateObjectGuide() } }
+  @Published private(set) var objectCenter: SIMD3<Float>?
+  @Published private(set) var processingMessage = ""
+  private let objectGuide = SCNNode()
+  var objectBounds: CaptureBounds? {
+    guard let center=objectCenter else { return nil }
+    let half=SIMD3(objectWidth,objectHeight,objectDepth)*0.5
+    return CaptureBounds(minimum:center-half,maximum:center+half)
+  }
+  func placeObject() {
+    guard let frame=arSession.currentFrame else { return }
+    let view=scanView.view
+    guard let hit=DetailFocus.surfacePoint(CGPoint(x:view.bounds.midX,y:view.bounds.midY),frame:frame,view:view) else {
+      lastWarning="Richt het midden op je object; daar is nog geen betrouwbare diepte.";return
+    }
+    let camera=simd_make_float3(frame.camera.transform.columns.3)
+    objectCenter=hit+simd_normalize(hit-camera)*objectDepth*0.5
+    lastWarning=nil;updateObjectGuide()
+  }
+  private func updateObjectGuide() {
+    guard let bounds=objectBounds else {objectGuide.removeFromParentNode();return}
+    if objectGuide.parent == nil {scanView.view.scene.rootNode.addChildNode(objectGuide)}
+    let box=SCNBox(width:CGFloat(bounds.size.x),height:CGFloat(bounds.size.y),length:CGFloat(bounds.size.z),chamferRadius:0)
+    let material=SCNMaterial();material.lightingModel = .constant;material.diffuse.contents=UIColor.systemCyan
+    material.fillMode = .lines;material.isDoubleSided=true;material.readsFromDepthBuffer=false;material.writesToDepthBuffer=false
+    box.firstMaterial=material;objectGuide.geometry=box;objectGuide.simdPosition=bounds.center;objectGuide.renderingOrder=90
+  }
   @Published private(set) var rooms: [RoomRecord] = []
   @Published private(set) var photoCount = 0
   private let autoPhotos = true
@@ -701,7 +732,14 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     applyGhostOpacity()
     refreshCoverage()
     diagnostics.log("room \(roomIndex) '\(roomName)' start", since: startedAt)
-    roomSession.run(configuration: RoomCaptureSession.Configuration())
+    if captureScope == .object {
+      let configuration=ARWorldTrackingConfiguration()
+      configuration.sceneReconstruction = .meshWithClassification
+      configuration.frameSemantics.insert(.sceneDepth)
+      configuration.planeDetection=[.horizontal,.vertical]
+      arSession.run(configuration,options:[])
+      objectCenter=nil;objectGuide.removeFromParentNode()
+    } else {roomSession.run(configuration:RoomCaptureSession.Configuration())}
     sessionRunning = true
     UIApplication.shared.isIdleTimerDisabled = true
     startTicking()
@@ -712,6 +750,9 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
   func finishRoom() {
     guard phase == .scanning else { return }
     if paused { resume() }
+    if detailFocus.painting {detailFocus.confirm(timestamp:arSession.currentFrame?.timestamp ?? 0)}
+    if captureScope == .object && objectBounds == nil {lastWarning="Plaats eerst het kader rond je object.";return}
+    if captureScope == .area && !detailFocus.hasSelection {lastWarning="Schilder eerst het gebied dat je wilt bewaren.";return}
     commitCandidate(allowHighResolution: false)
     detailFocus.end()
     do { try detailFocus.save() } catch { lastWarning = "Detailselectie niet opgeslagen: \(error.localizedDescription)" }
@@ -725,7 +766,8 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
       preStopMesh = await withCheckedContinuation { c in engine.exportPLY(to: file) { c.resume(returning: $0) } }
       guard !closed, phase == .finishingRoom else { return }
       cameraControl.unlock()
-      roomSession.stop(pauseARSession: false)
+      if captureScope == .object {await finish(with:nil,error:nil)}
+      else {roomSession.stop(pauseARSession:false)}
     }
   }
 
@@ -767,7 +809,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     Task { @MainActor in await self.finish(with: data, error: error) }
   }
 
-  private func finish(with data: CapturedRoomData, error: Error?) async {
+  private func finish(with data: CapturedRoomData?, error: Error?) async {
     // .scanning: RoomPlan ended on its own (tracking failure, scene too big): keep what it has
     guard !closed, phase == .finishingRoom || phase == .scanning else { return }
     if error != nil { sessionNeedsRestart = true }
@@ -793,6 +835,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     var record = RoomRecord(
       index: index, name: roomName.trimmingCharacters(in: .whitespaces), file: "rooms/room-\(index).json",
       usdz: "rooms/room-\(index).usdz", capturedAt: capturedAt, walls: 0, doors: 0, windows: 0, openings: 0, objects: 0)
+    if let data {
     // raw capture data first: RoomBuilder can be re-run on it later even if it fails now
     let dataFile = bundle.file("rooms/room-\(index)-data.json")
     let savedData = await Task.detached(priority: .utility) { () -> Bool in
@@ -816,6 +859,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
       record.file = "" // no layout for this room; capturedRooms only holds rooms RoomPlan built
       record.usdz = ""
     }
+    } else {record.file="";record.usdz=""}
     let meshFile = "mesh/room-\(index).ply"
     var result = preStopMesh
     if case .success(let r)? = result, r.vertices > 0 {} else {
@@ -828,7 +872,6 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     record.photoCoverage = record.photographedPercent
     record.detailSeconds = roomStartedAt.map { Date().timeIntervalSince($0) }
     record.detailPhotos = roomPhotoCount
-    rooms.append(record)
     pendingRoomIDs[index] = selectedRoomID
     do {
       try depthRecorder.save()
@@ -837,6 +880,27 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
       recordingSaveFailed = true
       lastWarning = "Some recording files could not be saved: \(error.localizedDescription). Free storage and finish the session to retry."
     }
+    record.captureScope=captureScope.rawValue
+    record.objectBounds=objectBounds
+    let scope=captureScope,bounds=objectBounds,selected=detailFocus.regions,bundleSnapshot=bundle
+    if scope != .room || selected.contains(where: {$0.room == index}) {
+      processingMessage="Dieptemetingen verwerken…"
+      do {
+        let report=try await Task.detached(priority:.userInitiated) { [weak self] in
+          try SurfaceProcessor.process(bundle:bundleSnapshot,room:index,scope:scope,objectBounds:bounds,regions:selected) { text in
+            Task { @MainActor [weak self] in self?.processingMessage=text }
+          }
+        }.value
+        record.reconstruction=report
+        record.mesh=MeshRecord(file:meshFile,anchors:0,vertices:report.outputVertices,faces:report.outputFaces)
+        if let warning=report.warning {lastWarning=warning}
+      } catch {
+        lastWarning="Verwerking niet voltooid: " + error.localizedDescription + " De oorspronkelijke opname is bewaard."
+        record.reconstruction=SurfaceProcessor.Report(status:"niet voltooid",warning:error.localizedDescription)
+      }
+    }
+    processingMessage="";objectGuide.removeFromParentNode()
+    rooms.append(record)
     do {
       house = try HouseProject.modify(house.id) {
         $0.recordRoomScan(name: record.name, session: plan.sessionID, index: index, capturedAt: capturedAt, roomID: selectedRoomID, matchName: false)
