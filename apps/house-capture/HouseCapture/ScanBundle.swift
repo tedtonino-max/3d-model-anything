@@ -174,6 +174,11 @@ struct ScanBundle {
     for path in ["rooms/room-\(index)-mesh.usdz", "mesh/room-\(index)-colors.bin"] {
       if fm.fileExists(atPath: file(path).path) { try copy(path) }
     }
+    for path in ["mesh/room-\(index)-base.ply","details/result-room-\(index).json"] {
+      if fm.fileExists(atPath:file(path).path) {try copy(path)}
+    }
+    let detailFile = "details/room-\(index).json"
+    if fm.fileExists(atPath: file(detailFile).path) { try copy(detailFile) }
     for photo in selectedPhotos { try copy(photo.file) }
     for frame in selectedDepth {
       try copy(frame.file)
@@ -388,6 +393,9 @@ struct RoomRecord: Codable, Identifiable {
   var windows: Int
   var openings: Int
   var objects: Int
+  var captureScope: String?
+  var objectBounds: CaptureBounds?
+  var reconstruction: SurfaceProcessor.Report?
   /// detail pass results
   var mesh: MeshRecord?
   /// fraction of the in-room mesh area that's well photographed
@@ -439,6 +447,7 @@ struct PhotoRecord: Codable {
   var highRes: Bool?
   /// camera state when the photo was taken, for normalizing brightness/color across photos
   var camera: CameraState?
+  var detailID: UUID?
 }
 
 /// Exposure + white balance + ARKit's light estimate for one frame

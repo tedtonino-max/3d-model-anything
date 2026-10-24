@@ -3,6 +3,7 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import ImageIO
 import RoomPlan
+import SceneKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -71,6 +72,36 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
 
   @Published private(set) var phase: Phase
   @Published var roomName = ""
+  @Published var captureScope: CaptureScope = .room
+  @Published var objectWidth: Float = 0.8 { didSet { updateObjectGuide() } }
+  @Published var objectHeight: Float = 0.8 { didSet { updateObjectGuide() } }
+  @Published var objectDepth: Float = 0.8 { didSet { updateObjectGuide() } }
+  @Published private(set) var objectCenter: SIMD3<Float>?
+  @Published private(set) var processingMessage = ""
+  private let objectGuide = SCNNode()
+  var objectBounds: CaptureBounds? {
+    guard let center=objectCenter else { return nil }
+    let half=SIMD3(objectWidth,objectHeight,objectDepth)*0.5
+    return CaptureBounds(minimum:center-half,maximum:center+half)
+  }
+  func placeObject() {
+    guard let frame=arSession.currentFrame else { return }
+    let view=scanView.view
+    guard let hit=DetailFocus.surfacePoint(CGPoint(x:view.bounds.midX,y:view.bounds.midY),frame:frame,view:view) else {
+      lastWarning="Richt het midden op je object; daar is nog geen betrouwbare diepte.";return
+    }
+    let camera=simd_make_float3(frame.camera.transform.columns.3)
+    objectCenter=hit+simd_normalize(hit-camera)*objectDepth*0.5
+    lastWarning=nil;updateObjectGuide()
+  }
+  private func updateObjectGuide() {
+    guard let bounds=objectBounds else {objectGuide.removeFromParentNode();return}
+    if objectGuide.parent == nil {scanView.view.scene.rootNode.addChildNode(objectGuide)}
+    let box=SCNBox(width:CGFloat(bounds.size.x),height:CGFloat(bounds.size.y),length:CGFloat(bounds.size.z),chamferRadius:0)
+    let material=SCNMaterial();material.lightingModel = .constant;material.diffuse.contents=UIColor.systemCyan
+    material.fillMode = .lines;material.isDoubleSided=true;material.readsFromDepthBuffer=false;material.writesToDepthBuffer=false
+    box.firstMaterial=material;objectGuide.geometry=box;objectGuide.simdPosition=bounds.center;objectGuide.renderingOrder=90
+  }
   @Published private(set) var rooms: [RoomRecord] = []
   @Published private(set) var photoCount = 0
   private let autoPhotos = true
@@ -143,7 +174,17 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     }
     return scan
   }()
-  private lazy var depthRecorder = DepthRecorder(bundle: bundle)
+  lazy var detailFocus: DetailFocus = {
+    let focus = DetailFocus(bundle: bundle); focus.attach(scanView.view.scene); return focus
+  }()
+  private lazy var depthRecorder: DepthRecorder = {
+    let recorder = DepthRecorder(bundle: bundle)
+    recorder.onRecorded = { [weak self] record in self?.detailFocus.recorded(record) }
+    recorder.onWriteFailure = { [weak self] message in
+      self?.lastWarning = "Een dieptebeeld kon niet worden opgeslagen. Scan dit deel opnieuw. " + message
+    }
+    return recorder
+  }()
   private let cameraControl = CameraControl()
   private var meshReadyAt: TimeInterval?
   /// mesh export taken just before RoomPlan stops (stopping reconfigures the session)
@@ -682,6 +723,8 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     lastCoverageProgress = Date()
     lastProgressPercent = 0
     roomPhotoCount = 0
+    detailFocus.end()
+    detailFocus.show(room: roomIndex)
     hint = .none
     engine.setRoom(nil)
     scanView.showRoom(nil)
@@ -689,7 +732,14 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     applyGhostOpacity()
     refreshCoverage()
     diagnostics.log("room \(roomIndex) '\(roomName)' start", since: startedAt)
-    roomSession.run(configuration: RoomCaptureSession.Configuration())
+    if captureScope == .object {
+      let configuration=ARWorldTrackingConfiguration()
+      configuration.sceneReconstruction = .meshWithClassification
+      configuration.frameSemantics.insert(.sceneDepth)
+      configuration.planeDetection=[.horizontal,.vertical]
+      arSession.run(configuration,options:[])
+      objectCenter=nil;objectGuide.removeFromParentNode()
+    } else {roomSession.run(configuration:RoomCaptureSession.Configuration())}
     sessionRunning = true
     UIApplication.shared.isIdleTimerDisabled = true
     startTicking()
@@ -700,7 +750,12 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
   func finishRoom() {
     guard phase == .scanning else { return }
     if paused { resume() }
+    if detailFocus.painting {detailFocus.confirm(timestamp:arSession.currentFrame?.timestamp ?? 0)}
+    if captureScope == .object && objectBounds == nil {lastWarning="Plaats eerst het kader rond je object.";return}
+    if captureScope == .area && !detailFocus.hasSelection {lastWarning="Schilder eerst het gebied dat je wilt bewaren.";return}
     commitCandidate(allowHighResolution: false)
+    detailFocus.end()
+    do { try detailFocus.save() } catch { lastWarning = "Detailselectie niet opgeslagen: \(error.localizedDescription)" }
     phase = .finishingRoom
     scanView.feed.isOn = false // freeze accepted mesh input for the export barrier
     // export the mesh while it's all still there, then let RoomPlan wrap up (didEndWith → finish)
@@ -711,7 +766,8 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
       preStopMesh = await withCheckedContinuation { c in engine.exportPLY(to: file) { c.resume(returning: $0) } }
       guard !closed, phase == .finishingRoom else { return }
       cameraControl.unlock()
-      roomSession.stop(pauseARSession: false)
+      if captureScope == .object {await finish(with:nil,error:nil)}
+      else {roomSession.stop(pauseARSession:false)}
     }
   }
 
@@ -753,7 +809,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     Task { @MainActor in await self.finish(with: data, error: error) }
   }
 
-  private func finish(with data: CapturedRoomData, error: Error?) async {
+  private func finish(with data: CapturedRoomData?, error: Error?) async {
     // .scanning: RoomPlan ended on its own (tracking failure, scene too big): keep what it has
     guard !closed, phase == .finishingRoom || phase == .scanning else { return }
     if error != nil { sessionNeedsRestart = true }
@@ -772,11 +828,14 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     scanView.feed.isOn = false
     await drainPhotos()
     guard !closed else { return }
+    await depthRecorder.flush()
+    do { try detailFocus.save() } catch { lastWarning = "Detailgegevens konden niet worden opgeslagen" }
     let index = roomIndex
     let capturedAt = Date()
     var record = RoomRecord(
       index: index, name: roomName.trimmingCharacters(in: .whitespaces), file: "rooms/room-\(index).json",
       usdz: "rooms/room-\(index).usdz", capturedAt: capturedAt, walls: 0, doors: 0, windows: 0, openings: 0, objects: 0)
+    if let data {
     // raw capture data first: RoomBuilder can be re-run on it later even if it fails now
     let dataFile = bundle.file("rooms/room-\(index)-data.json")
     let savedData = await Task.detached(priority: .utility) { () -> Bool in
@@ -800,6 +859,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
       record.file = "" // no layout for this room; capturedRooms only holds rooms RoomPlan built
       record.usdz = ""
     }
+    } else {record.file="";record.usdz=""}
     let meshFile = "mesh/room-\(index).ply"
     var result = preStopMesh
     if case .success(let r)? = result, r.vertices > 0 {} else {
@@ -812,7 +872,6 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     record.photoCoverage = record.photographedPercent
     record.detailSeconds = roomStartedAt.map { Date().timeIntervalSince($0) }
     record.detailPhotos = roomPhotoCount
-    rooms.append(record)
     pendingRoomIDs[index] = selectedRoomID
     do {
       try depthRecorder.save()
@@ -821,6 +880,28 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
       recordingSaveFailed = true
       lastWarning = "Some recording files could not be saved: \(error.localizedDescription). Free storage and finish the session to retry."
     }
+    record.captureScope=captureScope.rawValue
+    record.objectBounds=captureScope == .object ? objectBounds : nil
+    let scope=captureScope,bounds=objectBounds,selected=detailFocus.regions,bundleSnapshot=bundle
+    if scope != .room || selected.contains(where: {$0.room == index}) {
+      processingMessage="Dieptemetingen verwerken…"
+      do {
+        let report=try await Task.detached(priority:.userInitiated) { [weak self] in
+          try SurfaceProcessor.process(bundle:bundleSnapshot,room:index,scope:scope,objectBounds:bounds,regions:selected) { text in
+            Task { @MainActor [weak self] in self?.processingMessage=text }
+          }
+        }.value
+        record.reconstruction=report
+        record.mesh=MeshRecord(file:meshFile,anchors:0,vertices:report.outputVertices,faces:report.outputFaces)
+        if let warning=report.warning {lastWarning=warning}
+      } catch {
+        lastWarning="Verwerking niet voltooid: " + error.localizedDescription + " De oorspronkelijke opname is bewaard."
+        record.reconstruction=SurfaceProcessor.Report(status:"niet voltooid",warning:error.localizedDescription)
+      }
+    }
+    guard !closed else {return}
+    processingMessage="";objectGuide.removeFromParentNode()
+    rooms.append(record)
     do {
       house = try HouseProject.modify(house.id) {
         $0.recordRoomScan(name: record.name, session: plan.sessionID, index: index, capturedAt: capturedAt, roomID: selectedRoomID, matchName: false)
@@ -889,6 +970,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     endedAt = Date()
 
     finishingStep = "Saving…"
+    await depthRecorder.flush()
     do {
       try bundle.savePhotos(photos)
       try depthRecorder.save()
@@ -1210,7 +1292,13 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     var blur: Float
     var depth: CoverageEngine.DepthGrid?
     var highRes = false
+    var detailID: UUID?
     var camera: CameraState?
+  }
+
+  func beginDetailFocus() {
+    guard phase == .scanning, captureReady, !paused else { return }
+    candidate = nil; detailFocus.begin(room: roomIndex)
   }
 
   func takePhoto() {
@@ -1222,6 +1310,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     var shot = Shot(frame: frame, buffer: buffer, blur: lastBlur ?? 0)
     shot.depth = DepthRecorder.grid(for: frame)
     shot.camera = cameraControl.state(for: frame)
+    shot.detailID = detailFocus.captureID
     save(shot, manual: true)
   }
 
@@ -1324,7 +1413,11 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     }
     guard !paused, captureReady else { return }
     let budget = captureBudget
-    depthRecorder.consider(frame, room: roomIndex, camera: cameraControl.state(for: frame), interval: budget.depthInterval)
+    detailFocus.update(frame)
+    let detailID = detailFocus.captureID
+    depthRecorder.consider(frame, room: roomIndex, camera: cameraControl.state(for: frame),
+      interval: DetailFocusPolicy.depthInterval(normal: budget.depthInterval, constrained: budget.constrained, active: detailID != nil), detailID: detailID,
+      detailSamples: detailID == nil ? nil : detailFocus.observedIndices(frame))
     if frame.timestamp - lastEvaluate > budget.evaluationInterval {
       lastEvaluate = frame.timestamp
       engine.evaluate(view: Self.enginePhoto(frame: frame, sharpness: 1, depth: nil, room: roomIndex))
@@ -1369,6 +1462,11 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     let view = PhotoView(transform: frame.camera.transform)
     if resolveCandidate(frame: frame, view: view) { return }
     guard frame.timestamp - lastPhotoTime > captureBudget.photoInterval, blur <= Self.acceptableBlur else { return }
+    if detailFocus.captureID != nil {
+      let recent = photoViews.suffix(8)
+      guard recent.allSatisfy({ simd_distance($0.view.position, view.position) > 0.04 || simd_dot($0.view.forward, view.forward) < cos(Float.pi/24) }) else { return }
+      hold(frame, blur: blur); return
+    }
     let recent = photoViews.suffix(8)
     guard recent.allSatisfy({ simd_distance($0.view.position, view.position) > 0.12 || simd_dot($0.view.forward, view.forward) < cos(Float.pi / 18) }) else { return }
     if stats.meshArea > 0.5 || stats.targetsCovered > 0 || liveRoom != nil {
@@ -1399,6 +1497,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     var shot = Shot(frame: frame, buffer: copy, blur: blur)
     shot.depth = DepthRecorder.grid(for: frame)
     shot.camera = cameraControl.state(for: frame)
+    shot.detailID = detailFocus.captureID
     candidate = shot
   }
 
@@ -1451,6 +1550,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
           var shot = Shot(frame: frame, buffer: buffer, blur: blur)
           shot.depth = held.depth // depth from the video frame a moment earlier (same view)
           shot.highRes = true
+          shot.detailID = held.detailID
           shot.camera = self.cameraControl.state(for: frame)
           self.save(shot, manual: false)
         } else {
@@ -1493,9 +1593,10 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
       manual: manual,
       exposure: shot.exposure,
       blurPixels: manual ? nil : shot.blur * Float(scale),
-      pass: "scan",
+      pass: shot.detailID == nil ? "scan" : "detail",
       highRes: shot.highRes,
-      camera: shot.camera
+      camera: shot.camera,
+      detailID: shot.detailID
     )
     let view = PhotoView(transform: shot.transform)
     let enginePhoto = CoverageEngine.Photo(
@@ -1521,6 +1622,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
         guard !self.closed else { return }
         if ok {
           self.photos.append(record)
+          self.detailFocus.photoRecorded(record)
           self.photoViews.append((record.room, view))
           self.enginePhotos.append(enginePhoto)
           self.engine.add(enginePhoto)

@@ -115,7 +115,7 @@ struct HouseScreen: View {
           VStack(alignment: .leading, spacing: 14) {
             Image(systemName: "viewfinder").font(.system(size: 42, weight: .ultraLight)).foregroundStyle(Fieldwork.orange)
             Text("Every room starts here.").font(.title2.bold())
-            Text("Scan a room to save its shape, details and photos. Add the rest of your house whenever you're ready.")
+            Text("Scan een object, een hele kamer of een gekozen gebied. Bewaar de vorm, detailopnamen en foto’s.")
               .foregroundStyle(Fieldwork.secondary)
           }.padding(.vertical, 40)
         }
@@ -164,7 +164,7 @@ struct HouseScreen: View {
     }
     .safeAreaInset(edge: .bottom) {
       Button { onCapture(house.id, nil, nil, nil) } label: {
-        Label("Scan a room", systemImage: "viewfinder")
+        Label("Nieuwe scan · kamer of object", systemImage: "viewfinder")
       }.buttonStyle(FieldworkButtonStyle()).disabled(!CaptureController.isSupported)
         .padding(.horizontal, 24).padding(.top, 12).padding(.bottom, 10).background(Fieldwork.paper)
     }
