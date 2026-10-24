@@ -146,7 +146,14 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
   lazy var detailFocus: DetailFocus = {
     let focus = DetailFocus(bundle: bundle); focus.attach(scanView.view.scene); return focus
   }()
-  private lazy var depthRecorder = DepthRecorder(bundle: bundle)
+  private lazy var depthRecorder: DepthRecorder = {
+    let recorder = DepthRecorder(bundle: bundle)
+    recorder.onRecorded = { [weak self] record in self?.detailFocus.recorded(record) }
+    recorder.onWriteFailure = { [weak self] message in
+      self?.lastWarning = "Een dieptebeeld kon niet worden opgeslagen. Scan dit deel opnieuw. " + message
+    }
+    return recorder
+  }()
   private let cameraControl = CameraControl()
   private var meshReadyAt: TimeInterval?
   /// mesh export taken just before RoomPlan stops (stopping reconfigures the session)
@@ -686,6 +693,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     lastProgressPercent = 0
     roomPhotoCount = 0
     detailFocus.end()
+    detailFocus.show(room: roomIndex)
     hint = .none
     engine.setRoom(nil)
     scanView.showRoom(nil)
@@ -778,6 +786,8 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     scanView.feed.isOn = false
     await drainPhotos()
     guard !closed else { return }
+    await depthRecorder.flush()
+    do { try detailFocus.save() } catch { lastWarning = "Detailgegevens konden niet worden opgeslagen" }
     let index = roomIndex
     let capturedAt = Date()
     var record = RoomRecord(
@@ -895,6 +905,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     endedAt = Date()
 
     finishingStep = "Saving…"
+    await depthRecorder.flush()
     do {
       try bundle.savePhotos(photos)
       try depthRecorder.save()
@@ -1340,7 +1351,8 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
     detailFocus.update(frame)
     let detailID = detailFocus.captureID
     depthRecorder.consider(frame, room: roomIndex, camera: cameraControl.state(for: frame),
-      interval: DetailFocusPolicy.depthInterval(normal: budget.depthInterval, constrained: budget.constrained, active: detailID != nil), detailID: detailID)
+      interval: DetailFocusPolicy.depthInterval(normal: budget.depthInterval, constrained: budget.constrained, active: detailID != nil), detailID: detailID,
+      detailSamples: detailID == nil ? nil : detailFocus.observedIndices(frame))
     if frame.timestamp - lastEvaluate > budget.evaluationInterval {
       lastEvaluate = frame.timestamp
       engine.evaluate(view: Self.enginePhoto(frame: frame, sharpness: 1, depth: nil, room: roomIndex))
@@ -1545,6 +1557,7 @@ final class CaptureController: NSObject, ObservableObject, RoomCaptureSessionDel
         guard !self.closed else { return }
         if ok {
           self.photos.append(record)
+          self.detailFocus.photoRecorded(record)
           self.photoViews.append((record.room, view))
           self.enginePhotos.append(enginePhoto)
           self.engine.add(enginePhoto)

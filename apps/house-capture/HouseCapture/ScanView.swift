@@ -321,8 +321,11 @@ final class DepthRecorder: @unchecked Sendable {
     /// column-major 3x3, scaled to the depth map's resolution
     var intrinsics: [Float]
     var detailID: UUID?
+    var detailSamples: [Int]?
   }
 
+  var onRecorded: ((Record) -> Void)?
+  var onWriteFailure: ((String) -> Void)?
   private let bundle: ScanBundle
   private let queue = DispatchQueue(label: "depth-writer", qos: .utility)
   private(set) var records: [Record] = []
@@ -336,7 +339,7 @@ final class DepthRecorder: @unchecked Sendable {
   }
 
   /// Call every frame; keeps one when the camera has moved or turned enough (≤ 5/s)
-  func consider(_ frame: ARFrame, room: Int, camera: CameraState?, interval: TimeInterval = 0.2, detailID: UUID? = nil) {
+  func consider(_ frame: ARFrame, room: Int, camera: CameraState?, interval: TimeInterval = 0.2, detailID: UUID? = nil, detailSamples: [Int]? = nil) {
     guard let depth = frame.sceneDepth, inFlight < 3 else { return }
     guard case .normal = frame.camera.trackingState else { return }
     let pose = frame.camera.transform
@@ -361,21 +364,44 @@ final class DepthRecorder: @unchecked Sendable {
     let record = Record(
       file: "depth/\(name).f16z", confidence: "depth/\(name).conf", rgb: cg == nil ? nil : "depth/\(name).jpg",
       rgbIntrinsics: kc.columnMajor, camera: camera, room: room, timestamp: frame.timestamp,
-      width: w, height: h, transform: pose.columnMajor, intrinsics: k.columnMajor, detailID: detailID)
+      width: w, height: h, transform: pose.columnMajor, intrinsics: k.columnMajor, detailID: detailID, detailSamples: detailSamples)
     let depthData = Self.float16(depth.depthMap)
     let confData = depth.confidenceMap.map(Self.bytes)
     inFlight += 1
     queue.async {
-      try? ((try? (depthData as NSData).compressed(using: .zlib)) as Data? ?? depthData).write(to: self.bundle.file(record.file))
-      try? confData?.write(to: self.bundle.file(record.confidence))
-      if let cg, let rgb = record.rgb, let dest = CGImageDestinationCreateWithURL(self.bundle.file(rgb) as CFURL, "public.jpeg" as CFString, 1, nil) {
-        CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
-        CGImageDestinationFinalize(dest)
+      var failure: String?
+      do {
+        guard let confData else { throw CocoaError(.fileWriteUnknown) }
+        let compressed = try (depthData as NSData).compressed(using: .zlib) as Data
+        try compressed.write(to: self.bundle.file(record.file), options: .atomic)
+        try confData.write(to: self.bundle.file(record.confidence), options: .atomic)
+        if let cg, let rgb = record.rgb {
+          guard let dest = CGImageDestinationCreateWithURL(self.bundle.file(rgb) as CFURL, "public.jpeg" as CFString, 1, nil) else {
+            throw CocoaError(.fileWriteUnknown)
+          }
+          CGImageDestinationAddImage(dest,cg,[kCGImageDestinationLossyCompressionQuality:0.8] as CFDictionary)
+          guard CGImageDestinationFinalize(dest) else { throw CocoaError(.fileWriteUnknown) }
+        }
+      } catch {
+        failure = error.localizedDescription
+        for path in [record.file,record.confidence] + (record.rgb.map {[$0]} ?? []) {
+          try? FileManager.default.removeItem(at:self.bundle.file(path))
+        }
       }
+      let writeFailure = failure
       DispatchQueue.main.async {
-        self.records.append(record)
         self.inFlight -= 1
+        if let writeFailure { self.onWriteFailure?(writeFailure) }
+        else { self.records.append(record); self.onRecorded?(record) }
       }
+    }
+  }
+
+  /// The serial writer schedules its main-thread acknowledgements before this
+  /// barrier. Resuming only after them keeps the final index complete.
+  func flush() async {
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void,Never>) in
+      queue.async { DispatchQueue.main.async { continuation.resume() } }
     }
   }
 
